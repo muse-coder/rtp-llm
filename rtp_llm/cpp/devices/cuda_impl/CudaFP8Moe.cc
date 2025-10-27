@@ -15,6 +15,14 @@ namespace trt = tensorrt_llm::kernels;
 
 namespace rtp_llm {
 
+static void countValue(const BufferPtr& data, const std::string& name) {
+    auto data_t = Buffer2torchTensor(data, false);
+    for (int i = 0; i < 5; ++i) {
+        auto count = torch::sum(data_t == i).item<int64_t>();
+        RTP_LLM_LOG_INFO("%s[%d]: %ld", name.c_str(), i, count);
+    }
+}
+
 FfnLayerOutput CudaDevice::moeFfnFp8(const FfnLayerParams& params, const MoeGateSelectOutput& gate_outputs) {
 #ifdef ENABLE_FP8
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
@@ -68,7 +76,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
     const auto   moe_inter_size       = moe_conf.moe_inter_padding_size;
     const size_t num_experts_per_node = num_experts / moe_conf.ep_size;
     const auto   src_row_to_dst       = allocateBuffer({DataType::TYPE_INT32, {top_k, token_num}}, {"moe_src_to_dst"});
-    cudaMemsetAsync(src_row_to_dst->data(), -1, src_row_to_dst->sizeBytes(), stream_);
+    check_cuda_value(cudaMemsetAsync(src_row_to_dst->data(), -1, src_row_to_dst->sizeBytes(), stream_));
 
     const auto source_rows      = allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"source_rows"});
     const auto permuted_experts = allocateBuffer({DataType::TYPE_INT32, {top_k, token_num}}, {"permuted_experts"});
@@ -94,8 +102,9 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
                            expert_for_source_row->data<int>(),
                            token_num,
                            top_k,
-                           num_experts_per_node * moe_conf.ep_rank,
+                           start_expert,
                            stream_);
+        check_cuda_error();
     }
 
     trt::genSourceRow(expert_for_source_row->data<int>(),
@@ -107,6 +116,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
                       end_expert,
                       stream_);
     printBufferData(*source_rows, "source_rows");
+    check_cuda_error();
     trt::sortAndScanSoftmaxOutput(expert_for_source_row->data<int>(),
                                   source_rows->data<int>(),
                                   permuted_experts->data<int>(),
@@ -133,7 +143,8 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
     BufferPtr padding_group_index         = allocateBuffer(
         {DataType::TYPE_INT32, {pad_to_multiple_of_128(token_num) * num_experts_per_node}, AllocationType::HOST},
         {"padding_group_index"});
-    int* padding_group_index_ptr = padding_group_index->data<int>();
+    int*   padding_group_index_ptr = padding_group_index->data<int>();
+    size_t elem_num                = pad_to_multiple_of_128(token_num) * num_experts_per_node;
     for (int i = 0; i < num_experts_per_node; ++i) {
         size_t src_row_offset = expert_first_token_offset_host_ptr[i];
         size_t num_row_now    = expert_first_token_offset_host_ptr[i + 1] - expert_first_token_offset_host_ptr[i];
@@ -145,10 +156,33 @@ FfnLayerOutput CudaDevice::moeFfnFp8Contiguous(const FfnLayerParams& params, con
             padding_group_index_ptr[total_padding_num + j] = i;
         }
         total_padding_num += padding_size;
+        if (elem_num < total_padding_num) {
+            RTP_LLM_LOG_INFO("fix_moe[%d] %ld %ld %zu %zu %zu %zu",
+                             i,
+                             expert_first_token_offset_host_ptr[i],
+                             expert_first_token_offset_host_ptr[i + 1],
+                             src_row_offset,
+                             num_row_now,
+                             padding_size,
+                             total_padding_num);
+        }
+    }
+    if (elem_num < total_padding_num) {
+        RTP_LLM_LOG_INFO(
+            "fix_moe %zu %zu %zu %zu", token_num, pad_to_multiple_of_128(token_num), num_experts_per_node, elem_num);
+        countValue(expert_for_source_row, "fix_moe_expert_for_source_row");
+        countValue(permuted_experts, "fix_moe_permuted_experts");
+        forcePrintBufferData(*expert_for_source_row, "fix_moe_expert_for_source_row");
+        forcePrintBufferData(*source_rows, "fix_moe_source_rows");
+        forcePrintBufferData(*permuted_experts, "fix_moe_permuted_experts");
+        forcePrintBufferData(*expert_first_token_offset, "fix_moe_expert_first_token_offset");
+        fflush(stdout);
+        fflush(stderr);
+        abort();
     }
     BufferPtr permuted_src_row_to_dst_device = clone({*permuted_src_row_to_dst});
     BufferPtr padding_group_index_device     = clone({*padding_group_index});
-    cudaStreamSynchronize(stream_);
+    check_cuda_value(cudaStreamSynchronize(stream_));
     int64_t   dest_num_rows = expert_first_token_offset_host_ptr[num_experts_per_node];
     BufferPtr permuted_padding_input =
         allocateBuffer({DataType::TYPE_FP8_E4M3, {total_padding_num, hidden_size}}, {"permuted_padding_input"});
@@ -300,7 +334,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8Masked(const FfnLayerParams& params, const M
     const auto   moe_inter_size       = moe_conf.moe_inter_padding_size;
     const size_t num_experts_per_node = num_experts / moe_conf.ep_size;
     const auto   src_row_to_dst       = allocateBuffer({DataType::TYPE_INT32, {top_k, token_num}}, {"moe_src_to_dst"});
-    cudaMemsetAsync(src_row_to_dst->data(), -1, src_row_to_dst->sizeBytes(), stream_);
+    check_cuda_value(cudaMemsetAsync(src_row_to_dst->data(), -1, src_row_to_dst->sizeBytes(), stream_));
 
     const auto source_rows      = allocateBuffer({DataType::TYPE_INT32, {token_num, top_k}}, {"source_rows"});
     const auto permuted_experts = allocateBuffer({DataType::TYPE_INT32, {top_k, token_num}}, {"permuted_experts"});
@@ -326,8 +360,9 @@ FfnLayerOutput CudaDevice::moeFfnFp8Masked(const FfnLayerParams& params, const M
                            expert_for_source_row->data<int>(),
                            token_num,
                            top_k,
-                           num_experts_per_node * moe_conf.ep_rank,
+                           start_expert,
                            stream_);
+        check_cuda_error();
     }
 
     trt::genSourceRow(expert_for_source_row->data<int>(),
@@ -339,6 +374,7 @@ FfnLayerOutput CudaDevice::moeFfnFp8Masked(const FfnLayerParams& params, const M
                       end_expert,
                       stream_);
     printBufferData(*source_rows, "source_rows");
+    check_cuda_error();
     trt::sortAndScanSoftmaxOutput(expert_for_source_row->data<int>(),
                                   source_rows->data<int>(),
                                   permuted_experts->data<int>(),

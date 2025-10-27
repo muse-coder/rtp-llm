@@ -277,6 +277,51 @@ FfnLayerOutput CudaDevice::gatherCombineOutput(const MoeCombineOutput& combine_o
     }
 }
 
+static void
+countValue(const BufferPtr& data, const std::string& name, size_t token_num, size_t num_expert, size_t top_k) {
+    auto data_t = Buffer2torchTensor(data, false);
+    for (int i = 0; i < 5; ++i) {
+        auto count = torch::sum(data_t == i).item<int64_t>();
+        RTP_LLM_LOG_INFO("%s[%d]: %ld %zu %zu %zu", name.c_str(), i, count, token_num, num_expert, top_k);
+    }
+}
+
+__attribute__((noinline)) void check_hidden(CudaDevice* dev, const Buffer& input) {
+    RTP_LLM_LOG_ERROR("fix_moe");
+    dev->checkNAN(input);
+    RTP_LLM_LOG_ERROR("fix_moe2");
+}
+
+__attribute__((noinline)) void check_gate(CudaDevice* dev, const Buffer& input) {
+    RTP_LLM_LOG_ERROR("fix_moe");
+    dev->checkNAN(input);
+    RTP_LLM_LOG_ERROR("fix_moe2");
+}
+
+__attribute__((noinline)) void check_softmax_out(CudaDevice* dev, const Buffer& input) {
+    RTP_LLM_LOG_ERROR("fix_moe");
+    dev->checkNAN(input);
+    RTP_LLM_LOG_ERROR("fix_moe2");
+}
+
+__attribute__((noinline)) void check_expert_for_source_row(CudaDevice* dev, const Buffer& input) {
+    RTP_LLM_LOG_ERROR("fix_moe");
+    dev->checkNAN(input);
+    RTP_LLM_LOG_ERROR("fix_moe2");
+}
+
+__attribute__((noinline)) void check_source_rows(CudaDevice* dev, const Buffer& input) {
+    RTP_LLM_LOG_ERROR("fix_moe");
+    dev->checkNAN(input);
+    RTP_LLM_LOG_ERROR("fix_moe2");
+}
+
+__attribute__((noinline)) void check_expert_scales(CudaDevice* dev, const Buffer& input) {
+    RTP_LLM_LOG_ERROR("fix_moe");
+    dev->checkNAN(input);
+    RTP_LLM_LOG_ERROR("fix_moe2");
+}
+
 MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     RUNTIME_ASSERT_OP_ARG(params.configs.moe_configs, "moe configs not set");
     const auto& moe_conf = params.configs.moe_configs.value();
@@ -288,13 +333,15 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
     const auto num_expert = params.weights.moe_gating_weight->kernel->shape()[1];
     const auto top_k      = moe_conf.top_k;
 
+    // check_hidden(this, hidden);
     const auto gate = gemm({hidden,
                             *params.weights.moe_gating_weight->kernel,
                             nullopt,
                             nullptr,
                             DataType::TYPE_FP32,
                             DataType::TYPE_FP32});
-    BufferPtr  moe_gating;
+    // check_gate(this, *gate);
+    BufferPtr moe_gating;
 
     const auto expert_scales         = allocateBuffer({DataType::TYPE_FP32, {token_num, top_k}}, {"moe_expert_scale"});
     DataType   topk_t                = (init_params_.use_deepep_moe && params.qscheme == QScheme::Qfp8PerTokenBlock) ?
@@ -330,6 +377,10 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
                                                          0,
                                                          normalization_mode,
                                                          stream_);
+            check_softmax_out(this, *softmax_out);
+            // check_expert_for_source_row(this, *expert_for_source_row);
+            // check_source_rows(this, *source_rows);
+            check_expert_scales(this, *expert_scales);
         } else {
             moe_plugin_->selectExpertsForTokens<int>(gate->data<float>(),
                                                      gate->data<float>(),
@@ -372,6 +423,21 @@ MoeGateSelectOutput CudaDevice::moeGateSelect(const FfnLayerParams& params) {
 
     printBufferData(*expert_for_source_row, "expert_for_source_row");
     printBufferData(*expert_scales, "expert_scales");
+
+    auto data_t = Buffer2torchTensor(expert_for_source_row, false);
+    auto count0 = static_cast<size_t>(torch::sum(data_t == 0).item<int64_t>());
+    auto count1 = static_cast<size_t>(torch::sum(data_t == 1).item<int64_t>());
+    auto count2 = static_cast<size_t>(torch::sum(data_t == 2).item<int64_t>());
+    auto count3 = static_cast<size_t>(torch::sum(data_t == 3).item<int64_t>());
+    auto count4 = static_cast<size_t>(torch::sum(data_t == 4).item<int64_t>());
+
+    if (count0 > token_num || count1 > token_num || count2 > token_num || count3 > token_num || count4 > token_num) {
+        countValue(expert_for_source_row, "fix_moe_expert_for_source_row-moeGateSelect", token_num, num_expert, top_k);
+        forcePrintBufferData(*expert_for_source_row, "fix_moe_expert_for_source_row-moeGateSelect");
+        forcePrintBufferData(hidden, "fix_moe_hidden-moeGateSelect");
+        forcePrintBufferData(*gate, "fix_moe_gate-moeGateSelect");
+    }
+
     return {expert_for_source_row, expert_scales, moe_gating};
 }
 
