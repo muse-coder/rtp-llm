@@ -6,9 +6,10 @@ import time
 
 import requests
 
-from rtp_llm.config.py_config_modules import ServerConfig
+from rtp_llm.config.py_config_modules import ServerConfig, StaticConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.ops import ProfilingDebugLoggingConfig
+from rtp_llm.tools.api.hf_model_helper import get_hf_model_info
 
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
@@ -162,6 +163,7 @@ def start_server():
     backend_process = None
     frontend_process = None
     try:
+        get_model_type_and_update_env()
         if os.environ.get("ROLE_TYPE", "") != "FRONTEND":
             logging.info("start backend server")
             backend_process = start_backend_server_impl(global_controller)
@@ -178,6 +180,17 @@ def start_server():
         logging.error(f"start failed, {str(e)}")
     finally:
         monitor_and_release_process(backend_process, frontend_process)
+
+
+def get_model_type_and_update_env():
+    model_path = os.environ.get("CHECKPOINT_PATH", StaticConfig.model_config.checkpoint_path)
+    if model_path is not None and model_path != "":
+        current_model_type = os.environ.get("MODEL_TYPE", StaticConfig.model_config.model_type)
+        if current_model_type is None or current_model_type == "":
+            model_info = get_hf_model_info(model_path)
+            config_model_type = model_info.ft_model_type
+            StaticConfig.model_config.model_type = config_model_type
+            os.environ["MODEL_TYPE"] = config_model_type
 
 
 if __name__ == "__main__":
