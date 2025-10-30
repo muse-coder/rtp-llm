@@ -105,7 +105,6 @@ class GenerateConfig(BaseModel):
     # for load balance
     role_addrs: List[RoleAddr] = []
     trace_id: str = ""
-    private_request: bool = False
     # inter request id, from master
     inter_request_id: int = -1
 
