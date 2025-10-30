@@ -539,7 +539,6 @@ whl_reqs = [
     "xfastertransformer_devel_icx==1.8.1.1",
     "grpcio==1.62.0",
     #"decord==0.6.0",
-    "accelerate==0.34.2",
     "oss2",
     "orjson",
     "aiohttp",
