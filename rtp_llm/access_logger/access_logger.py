@@ -41,7 +41,9 @@ class AccessLogger:
 
     @staticmethod
     def is_private_request(request: Dict[str, Any]):
-        return request.get("private_request", False)
+        return request.get("private_request", False) or request.get(
+            "generate_config", {}
+        ).get("private_request", False)
 
     def log_access(self, request: Dict[str, Any], response: ResponseLog) -> None:
         request_log = RequestLog.from_request(request)
